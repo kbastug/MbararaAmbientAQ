@@ -1,0 +1,147 @@
+// Combined daily table for Mbarara: PM2.5 + rainfall + temperature + humidity proxy
+// Exports one CSV per year to reduce Earth Engine failures.
+//
+// Sources:
+// - PM2.5: ECMWF/CAMS/NRT
+// - Rainfall: UCSB-CHG/CHIRPS/DAILY
+// - Temperature/dew point: ECMWF/ERA5_LAND/DAILY_AGGR
+//
+// Output columns:
+// date
+// pm25_ugm3
+// rainfall_mm_day
+// temp_c
+// dewpoint_c
+// rh_pct
+//
+// Notes:
+// - PM2.5 is converted from kg/m3 to µg/m3 by multiplying by 1e9
+// - Temperature/dew point are converted from K to °C
+// - RH is derived from temp and dew point using a standard Magnus-type formula
+// - This is point extraction at Mbarara town; change coordinates if needed
+
+var pt = ee.Geometry.Point([30.65, -0.61]);   // Mbarara town approx
+
+function dailyTableForYear(year) {
+  var start = ee.Date.fromYMD(year, 1, 1);
+  var end   = start.advance(1, 'year');
+  var nDays = end.difference(start, 'day');
+  var dayList = ee.List.sequence(0, nDays.subtract(1));
+
+  var table = ee.FeatureCollection(dayList.map(function(d) {
+    d = ee.Number(d);
+    var dayStart = start.advance(d, 'day');
+    var dayEnd   = dayStart.advance(1, 'day');
+    var dateStr  = dayStart.format('YYYY-MM-dd');
+
+    // CAMS PM2.5: choose one daily field (init hour 0, forecast hour 0)
+    var pmImg = ee.ImageCollection('ECMWF/CAMS/NRT')
+      .filterDate(dayStart, dayEnd)
+      .filter('model_initialization_hour == 0')
+      .filter('model_forecast_hour == 0')
+      .select('particulate_matter_d_less_than_25_um_surface')
+      .first();
+
+    var pm25 = ee.Algorithms.If(
+      pmImg,
+      ee.Image(pmImg).multiply(1e9).reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: pt,
+        scale: 45000,
+        bestEffort: true,
+        maxPixels: 1e13
+      }).get('particulate_matter_d_less_than_25_um_surface'),
+      null
+    );
+
+    // CHIRPS rainfall (mm/day)
+    var rainImg = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+      .filterDate(dayStart, dayEnd)
+      .select('precipitation')
+      .first();
+
+    var rain = ee.Algorithms.If(
+      rainImg,
+      ee.Image(rainImg).reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: pt,
+        scale: 5566,
+        bestEffort: true,
+        maxPixels: 1e13
+      }).get('precipitation'),
+      null
+    );
+
+    // ERA5-Land daily aggregated: temp and dew point
+    var eraImg = ee.ImageCollection('ECMWF/ERA5_LAND/DAILY_AGGR')
+      .filterDate(dayStart, dayEnd)
+      .select(['temperature_2m', 'dewpoint_temperature_2m'])
+      .first();
+
+    var tempK = ee.Algorithms.If(
+      eraImg,
+      ee.Image(eraImg).reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: pt,
+        scale: 11132,
+        bestEffort: true,
+        maxPixels: 1e13
+      }).get('temperature_2m'),
+      null
+    );
+
+    var dewK = ee.Algorithms.If(
+      eraImg,
+      ee.Image(eraImg).reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: pt,
+        scale: 11132,
+        bestEffort: true,
+        maxPixels: 1e13
+      }).get('dewpoint_temperature_2m'),
+      null
+    );
+
+    // Convert Kelvin to Celsius
+    var tempC = ee.Algorithms.If(tempK, ee.Number(tempK).subtract(273.15), null);
+    var dewC  = ee.Algorithms.If(dewK, ee.Number(dewK).subtract(273.15), null);
+
+    // Relative humidity from temp/dew point (Magnus-type approximation)
+    var rh = ee.Algorithms.If(
+      ee.Algorithms.IsEqual(tempC, null),
+      null,
+      ee.Number(100).multiply(
+        ee.Number(
+          ee.Number(17.625).multiply(ee.Number(dewC))
+            .divide(ee.Number(243.04).add(ee.Number(dewC)))
+            .subtract(
+              ee.Number(17.625).multiply(ee.Number(tempC))
+                .divide(ee.Number(243.04).add(ee.Number(tempC)))
+            )
+        ).exp()
+      )
+    );
+
+    return ee.Feature(null)
+      .set('date', dateStr)
+      .set('pm25_ugm3', pm25)
+      .set('rainfall_mm_day', rain)
+      .set('temp_c', tempC)
+      .set('dewpoint_c', dewC)
+      .set('rh_pct', rh);
+  }));
+
+  return table;
+}
+
+// Create one export task per year
+[2021, 2022, 2023, 2024].forEach(function(y) {
+  Export.table.toDrive({
+    collection: dailyTableForYear(y),
+    description: 'Mbarara_PM25_Rain_Temp_RH_' + y,
+    fileFormat: 'CSV'
+  });
+});
+
+
+// Avoid big print() calls; they can trigger memory/errors.

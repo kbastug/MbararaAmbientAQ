@@ -1,0 +1,28 @@
+// Mean CAMS PM2.5 map for Mbarara area, 2021-2024
+
+var mbarara = ee.Geometry.Point([30.65, -0.61]);
+var region = mbarara.buffer(50000); // 50 km radius
+
+Map.centerObject(region, 9);
+Map.addLayer(region, {color: 'black'}, 'Study area');
+
+// Load CAMS PM2.5
+var cams = ee.ImageCollection('ECMWF/CAMS/NRT')
+  .filterDate('2021-01-01', '2025-01-01')
+  .filter('model_initialization_hour == 0')
+  .filter('model_forecast_hour == 0')
+  .select('particulate_matter_d_less_than_25_um_surface')
+  .map(function(img) {
+    return img.multiply(1e9).rename('pm25_ugm3')
+      .copyProperties(img, ['system:time_start']);
+  });
+
+// Mean over time
+var meanPM25 = cams.mean().clip(region);
+
+// Display
+Map.addLayer(
+  meanPM25,
+  {min: 5, max: 40},
+  'Mean PM2.5 (µg/m3), 2021-2024'
+);

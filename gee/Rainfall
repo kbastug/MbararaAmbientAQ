@@ -1,0 +1,15 @@
+var pt = ee.Geometry.Point([30.65, -0.61]);
+
+var rain = ee.ImageCollection('UCSB-CHG/CHIRPS/DAILY')
+  .filterDate('2021-01-01','2025-01-01');
+
+var rainfallSeries = ui.Chart.image.series({
+  imageCollection: rain,
+  region: pt,
+  reducer: ee.Reducer.mean(),
+  scale: 5000
+}).setOptions({
+  title: 'Daily Rainfall (mm)'
+});
+
+print(rainfallSeries);
